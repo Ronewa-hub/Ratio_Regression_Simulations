@@ -1,0 +1,977 @@
+library(tidyverse)
+library(mosaic)
+library(ggplot2)
+
+data("diamonds")
+head(diamonds)
+View(diamonds)
+help("diamonds")
+
+# Calculating the population mean of the diamonds dataset
+average_price<-mean # Average price in US dollars
+average_price
+
+###################### Create a Finite Population for the diamonds dataset ############
+set.seed(20031106)
+diamond_finite<-diamonds[sample(nrow(diamonds),10000,replace=FALSE),] #SRSWOR
+View(diamond_finite)
+
+########### Stratified Random Sampling Analysis ###################
+boxplot(price~cut,data=diamond_finite,ylab="Price of diamonds",xlab="quality of the cut for diamonds")
+
+########### Scatter plot of Carat Weight Vs Diamond Market Prices
+library(dplyr)
+
+# 2. Create the 2D scatter plot (Carat vs Price)
+ggplot(data = diamond_finite, aes(x = carat, y = price)) +
+  # Use alpha for transparency to reveal density/overlap
+  geom_point(alpha = 0.2, color = "steelblue") + 
+  # Add a non-linear smooth trend line (GAM or LOESS) to show the curve
+  geom_smooth(method = "gam", color = "darkorange", size = 1.2, se = FALSE) +
+  # Clean up labels and add a professional theme
+  labs(
+    title = "Diamond Price vs. Carat Weight",
+    subtitle = "Sample of 10,000 observations showing exponential price growth",
+    x = "Carat Weight (x)",
+    y = "Price in USD (y)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+
+########### Modify the diamond_finite dataset by inserting variable called N.
+diamond_finite$N<-NA
+View(diamond_finite)
+
+###### Lets determine the population size of different cuts of diamonds
+table(diamond_finite$cut)
+
+######### Subscript the different cuts of diamonds by their population size
+diamond_finite$N[diamond_finite$cut=="Fair"]<-307
+diamond_finite$N[diamond_finite$cut=="Good"]<-883
+diamond_finite$N[diamond_finite$cut=="Very Good"]<-2200
+diamond_finite$N[diamond_finite$cut=="Premium"]<-2531
+diamond_finite$N[diamond_finite$cut=="Ideal"]<-4097
+
+#### View the data with subscripting
+head(diamond_finite,20)
+View(diamond_finite)
+
+########## We implement the sampling design- Stratified Random sampling
+library(survey)
+
+diamond_design<-svydesign(ids= ~1,strata= ~cut,fpc= ~N,data=diamond_finite)
+
+############ Inferences about mu plus obtaining a design effect of the stratified sampling design
+svymean(~price,design=diamond_design,deff=TRUE)
+
+# Calculating the required sample size using SRS
+library(dplyr)
+set.seed(20031106)
+# ---------- 1. Inputs ----------
+N          <- nrow(diamond_finite)        # 10000
+z          <- 1.96                        # 95% confidence
+baseline   <- 3909.325
+half_width <- 0.05 * baseline             # 195.466 (5% of baseline)
+W          <- 2 * half_width              # full CI width = 390.933
+S          <- sd(diamond_finite$price)    # 3986.018
+
+# ---------- 2. Sample size from the width (section 3.4) ----------
+n_W   <- (4 * z^2 * S^2) / W^2            # n_W = 4 Z^2 S^2 / W^2
+n_srs <- n_W / (1 + n_W / N)              # apply the finite population correction
+n_srs <- ceiling(n_srs)                   # round up
+
+n_W
+n_srs                                     # about 1378
+
+
+deff   <- 0.9077 # Reason for using deff: the stratified design will reach the same precision as the SRS with fewer units
+n_srs  <- ceiling(n_W / (1 + n_W / N))   # 1378
+n_str  <- ceiling(deff * n_srs)          # 1251
+
+# ---------- 3. Stratum summaries (strata = cut) ----------
+strata <- diamond_finite %>%
+  group_by(cut) %>%
+  summarise(N_h = n(),                    # stratum size
+            S_h = sd(price))              # stratum standard deviation
+
+# ---------- 4. Neyman allocation: n_h = n * N_h * S_h / sum(N_h * S_h) ----------
+strata <- strata %>%
+  mutate(n_h = ceiling(n_str * N_h * S_h / sum(N_h * S_h)))
+
+strata
+sum(strata$n_h)    # total sample size (may be 1-4 above n_srs because of rounding up)
+
+
+library(dplyr)
+set.seed(20031106)
+
+# ---------- Stratified sample: SRSWOR of n_h units within each cut ----------
+diamond_frame <- diamond_finite %>%
+  left_join(strata %>% select(cut, N_h, n_h), by = "cut")
+
+stratified_data <- do.call(rbind, lapply(
+  split(diamond_frame, diamond_frame$cut),
+  function(d) d[sample(nrow(d), size = d$n_h[1], replace = FALSE), ]
+))
+rownames(stratified_data) <- NULL
+
+# Sampling weight: each sampled unit represents N_h / n_h diamonds
+stratified_data$weight <- stratified_data$N_h / stratified_data$n_h
+
+# Checks
+nrow(stratified_data)                 # should be 1253
+table(stratified_data$cut)            # should be 35, 104, 278, 346, 490
+sum(stratified_data$weight)           # should be 10000
+
+# ---------- Simple random sample without replacement (whole population) ----------
+
+n_srs <- nrow(stratified_data)     # 1253, same size as the stratified sample
+
+SRSWOR_data <- diamond_finite[sample(nrow(diamond_finite), size = n_srs,
+                                     replace = FALSE), ]
+rownames(SRSWOR_data) <- NULL
+
+# Sampling weight and fpc for the SRS design
+SRSWOR_data$weight <- nrow(diamond_finite) / n_srs
+SRSWOR_data$N      <- nrow(diamond_finite)
+
+# Checks
+nrow(SRSWOR_data)                  # should be 1253
+sum(SRSWOR_data$weight)            # should be 10000
+
+View(SRSWOR_data)
+View(stratified_data)
+
+################### Lets view the Carat Weight Vs Price of diamonds Plot
+library(patchwork)
+library(ggplot2)
+
+############# Lets transform our auxiliary variable (X) using a log function
+# 1. For both stratified, SRSWOR and diamond_finite data-sets.
+
+# 2. Create the first plot (Stratified data) and save it to 'p1'
+p1 <- ggplot(data = stratified_data, aes(x = carat, y = price)) +
+  geom_point(alpha = 0.2, color = "steelblue") + 
+  geom_smooth(method = "gam", color = "darkorange", size = 1.2, se = FALSE) +
+  labs(
+    title = "Diamond Price vs. Carat Weight",
+    subtitle = "Stratified Sample (1253 obs)",
+    x = "Carat Weight (x)",
+    y = "Price in USD (y)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+
+# 3. Create the second plot (SRSWOR data) and save it to 'p2'
+p2 <- ggplot(data = SRSWOR_data, aes(x = carat, y = price)) +
+  geom_point(alpha = 0.2, color = "steelblue") + 
+  geom_smooth(method = "gam", color = "lightgreen", size = 1.2, se = FALSE) +
+  labs(
+    title = "Diamond Price vs. Carat Weight",
+    subtitle = "SRSWOR Sample (1253 obs)",
+    x = "Carat Weight (x)",
+    y = "Price in USD (y)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+
+# 4. Combine the plots side-by-side (1x2 layout)
+# The '|' operator ensures they sit in 1 row and 2 columns
+p1 | p2
+
+
+# We can see that for both sampling designs, carat weight (X) has a linear
+# correlation with Price of diamonds (Y). We will estimate the population
+# mean using ratio and regression methods of estimation.
+
+##### Ratio Estimation
+library(survey)
+
+# ---------- Population quantities for the auxiliary variable ----------
+N       <- nrow(diamond_finite)
+X_total <- sum(diamond_finite$carat)
+X_mean  <- mean(diamond_finite$carat)
+
+# Does a ratio estimator beat SRS? (notes, Corollary 7.3: rho > Cx / (2 Cy))
+rho <- cor(diamond_finite$price, diamond_finite$carat)
+Cx  <- sd(diamond_finite$carat) / mean(diamond_finite$carat)
+Cy  <- sd(diamond_finite$price) / mean(diamond_finite$price)
+c(rho = rho, threshold = Cx / (2 * Cy))   # want rho > threshold
+# We can see that rho > threshold, so yes the ratio estimator does beat the SRS
+
+
+# ---------- Survey designs ----------
+srs_design   <- svydesign(ids = ~1, weights = ~weight, fpc = ~N,
+                          data = SRSWOR_data)
+strat_design <- svydesign(ids = ~1, strata = ~cut, weights = ~weight,
+                          fpc = ~N_h, data = stratified_data)
+
+# ---------- Ratio estimator ----------
+ratio_mean <- function(design, label) {
+  r   <- svyratio(~price, ~carat, design)      # R-hat and its SE
+  tot <- predict(r, total = X_total)           # ratio estimate of the price total
+  est <- as.numeric(tot$total) / N             # mean = total / N
+  se  <- as.numeric(tot$se) / N
+  cat("\n", label, "\n")
+  print(r)                                     # ratio R-hat and SE
+  data.frame(estimate = est, SE = se,
+             lower = est - 1.96 * se, upper = est + 1.96 * se)
+}
+
+ratio_mean(srs_design,   "Ratio estimator, SRSWOR")
+ratio_mean(strat_design, "Ratio estimator, Stratified")
+
+# ---------- Regression estimator ----------
+reg_mean <- function(design, label) {
+  cal <- calibrate(design, ~carat,
+                   population = c("(Intercept)" = N, carat = X_total))
+  m   <- svymean(~price, cal)
+  cat("\n", label, "\n")
+  print(m)
+  confint(m)
+}
+
+reg_mean(srs_design,   "Regression estimator, SRSWOR")
+reg_mean(strat_design, "Regression estimator, Stratified")
+
+# ---------- Baseline for comparison ----------
+svymean(~price, srs_design)
+svymean(~price, strat_design)
+mean(diamond_finite$price)
+
+
+library(survey)
+
+# Uses: srs_design, strat_design, N, X_total (from before)
+
+get_est <- function(design, design_name) {
+  
+  # Baseline: weighted sample mean (no auxiliary variable)
+  m0 <- svymean(~price, design)
+  
+  # Ratio estimator
+  r   <- svyratio(~price, ~carat, design)
+  tot <- predict(r, total = X_total)
+  est_r <- as.numeric(tot$total) / N
+  se_r  <- as.numeric(tot$se) / N
+  
+  # Regression estimator (calibration on intercept + carat)
+  cal <- calibrate(design, ~carat,
+                   population = c("(Intercept)" = N, carat = X_total))
+  m2  <- svymean(~price, cal)
+  
+  data.frame(
+    Design   = design_name,
+    Method   = c("Sample mean", "Ratio", "Regression"),
+    Estimate = c(as.numeric(coef(m0)), est_r, as.numeric(coef(m2))),
+    SE       = c(as.numeric(SE(m0)),   se_r,  as.numeric(SE(m2)))
+  )
+}
+
+res <- rbind(get_est(srs_design,   "SRSWOR"),
+             get_est(strat_design, "Stratified"))
+
+# Extra columns: SE relative to the sample mean and CI half-width vs the 5% target
+res <- res %>%
+  group_by(Design) %>%
+  mutate(SE_vs_mean = SE / SE[Method == "Sample mean"]) %>%
+  ungroup() %>%
+  mutate(HalfWidth = 1.96 * SE,
+         Within_5pct = HalfWidth <= 0.05 * 3909.325)
+
+print(as.data.frame(res), digits = 5)
+
+# Compact comparison table of SEs (rows = design, columns = method)
+round(xtabs(SE ~ Design + Method, data = res), 2)
+
+######### Plot the curve of the required sample against the margin of error##########
+library(dplyr)
+library(ggplot2)
+library(survey)
+
+z <- qnorm(0.975)                    # Z_(alpha/2) for 95% confidence
+N <- nrow(diamond_finite)
+
+# ---------- 1. Theoretical MoE under Neyman allocation ----------
+pop_str <- diamond_finite %>%
+  group_by(cut) %>%
+  summarise(N_h = n(), S_h = sd(price)) %>%
+  mutate(W_h = N_h / N)
+
+A <- sum(pop_str$W_h * pop_str$S_h)
+B <- sum(pop_str$W_h * pop_str$S_h^2) / N
+
+V_opt   <- function(n) A^2 / n - B           # V_opt(y_st bar), section 4.4
+MoE_opt <- function(n) z * sqrt(V_opt(n)) # MoE = Z * SE_opt
+
+curve_df <- data.frame(n = seq(200, 3000, by = 10)) %>%
+  mutate(MoE = MoE_opt(n))
+
+# ---------- 2. Observed MoE from your drawn sample (svymean) ----------
+n_final <- nrow(stratified_data)             # final sample size (1253)
+se_obs  <- as.numeric(SE(svymean(~price, strat_design)))
+moe_obs <- z * se_obs
+
+# ---------- 3. svymean MoE at several sample sizes (one draw per n) ----------
+set.seed(20031106)
+draw_moe <- function(n) {
+  alloc <- pop_str %>%
+    mutate(n_h = pmin(ceiling(n * N_h * S_h / sum(N_h * S_h)), N_h))
+  
+  smp <- do.call(rbind, Map(function(d, nh) d[sample(nrow(d), nh), ],
+                            split(diamond_finite, diamond_finite$cut),
+                            alloc$n_h))
+  
+  smp <- smp %>%
+    left_join(alloc %>% select(cut, N_h, n_h), by = "cut") %>%
+    mutate(weight = N_h / n_h)
+  
+  des <- svydesign(ids = ~1, strata = ~cut, weights = ~weight,
+                   fpc = ~N_h, data = smp)
+  
+  c(n = nrow(smp), MoE = z * as.numeric(SE(svymean(~price, des))))
+}
+
+sim_pts <- as.data.frame(t(sapply(c(300, 500, 800, 1253, 1800, 2500), draw_moe)))
+
+# ---------- 4. Target margin of error and the n that achieves it ----------
+target <- 0.05 * 3909.325                    # 195.466
+n_req  <- ceiling(A^2 / ((target / z)^2 + B))
+n_req                                        # exact Neyman size for the target
+
+# ---------- 5. Plot ----------
+ggplot(curve_df, aes(x = n, y = MoE)) +
+  geom_line(aes(colour = "V_opt formula"), linewidth = 1) +
+  geom_point(data = sim_pts, aes(x = n, y = MoE, colour = "svymean (one drawn sample)"),
+             size = 2.5) +
+  geom_point(aes(x = n_final, y = moe_obs, colour = "Your sample (svymean)"),
+             size = 4, shape = 17) +
+  geom_hline(yintercept = target, linetype = "dashed", colour = "red") +
+  geom_vline(xintercept = n_final, linetype = "dotted", colour = "grey40") +
+  annotate("text", x = max(curve_df$n), y = target, vjust = -0.6, hjust = 1,
+           label = "5% target (195.5)", colour = "red", size = 3.5) +
+  scale_colour_manual(values = c("V_opt formula" = "steelblue",
+                                 "svymean (one drawn sample)" = "grey30",
+                                 "Your sample (svymean)" = "darkorange")) +
+  labs(title = "Margin of error vs sample size: Stratified (Neyman allocation)",
+       subtitle = "95% confidence interval for the mean diamond price",
+       x = "Sample size (n)", y = "Margin of error (price)", colour = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+
+library(dplyr)
+library(ggplot2)
+library(survey)
+
+z        <- qnorm(0.975)
+N        <- nrow(diamond_finite)
+baseline <- 3909.325
+scales   <- c(0.25, 0.50, 0.75, 1.00)
+
+# ---------- Population quantities for Neyman variance (baseline scale) ----------
+pop_str <- diamond_finite %>%
+  group_by(cut) %>%
+  summarise(N_h = n(), S_h = sd(price)) %>%
+  mutate(W_h = N_h / N)
+
+A0 <- sum(pop_str$W_h * pop_str$S_h)
+B0 <- sum(pop_str$W_h * pop_str$S_h^2) / N
+
+# Scenario labels
+lab <- function(k) sprintf("%.0f%% of baseline (%.1f)", k * 100, k * baseline)
+
+# ---------- 1. Theoretical curves: MoE = Z * sqrt(V_opt), scaled by k ----------
+n_grid <- seq(300, 2500, by = 10)
+
+curve_df <- do.call(rbind, lapply(scales, function(k) {
+  A <- k * A0;  B <- k^2 * B0
+  data.frame(scale = k, n = n_grid, MoE = z * sqrt(A^2 / n_grid - B))
+}))
+
+# ---------- 2. Triangles: required n for the 5% target of each assumed value ----------
+tri_df <- do.call(rbind, lapply(scales, function(k) {
+  A <- k * A0;  B <- k^2 * B0
+  target <- 0.05 * k * baseline
+  n_req  <- ceiling(A^2 / ((target / z)^2 + B))
+  data.frame(scale = k, n = n_req, target = target,
+             MoE = z * sqrt(A^2 / n_req - B))
+}))
+tri_df
+
+# ---------- 3. svymean points (drawn once, scaled for each scenario) ----------
+set.seed(20031106)
+draw_se <- function(n) {
+  alloc <- pop_str %>%
+    mutate(n_h = pmin(ceiling(n * N_h * S_h / sum(N_h * S_h)), N_h))  # Neyman allocation
+  smp <- do.call(rbind, lapply(seq_len(nrow(alloc)), function(i) {
+    d <- diamond_finite[diamond_finite$cut == alloc$cut[i], ]
+    d <- d[sample(nrow(d), alloc$n_h[i], replace = FALSE), ]         # SRSWOR within the cut
+    d$N_h <- alloc$N_h[i];  d$n_h <- alloc$n_h[i]
+    d
+  }))
+  smp$weight <- smp$N_h / smp$n_h
+  des <- svydesign(ids = ~1, strata = ~cut, weights = ~weight,
+                   fpc = ~N_h, data = smp)
+  c(n = nrow(smp), SE = as.numeric(SE(svymean(~price, des))))
+}
+
+pt_n <- c(300, 600, 900, 1250, 1600, 2000, 2500)
+pts0 <- do.call(rbind, lapply(pt_n, function(n) {
+  out <- replicate(10, draw_se(n))               # average 10 draws per n
+  data.frame(n = mean(out["n", ]), MoE0 = z * mean(out["SE", ]))
+}))
+
+# Multiplying price by k multiplies the SE by exactly k, so no new sampling is needed
+pts_df <- do.call(rbind, lapply(scales, function(k)
+  data.frame(scale = k, n = pts0$n, MoE = k * pts0$MoE0)))
+
+# ---------- 4. Labels and plot ----------
+curve_df$Scenario <- factor(lab(curve_df$scale), levels = lab(scales))
+pts_df$Scenario   <- factor(lab(pts_df$scale),   levels = lab(scales))
+tri_df$Scenario   <- factor(lab(tri_df$scale),   levels = lab(scales))
+
+cols <- setNames(c("#1b9e77", "#d95f02", "#7570b3", "#e7298a"), lab(scales))
+
+ggplot() +
+  geom_line(data = curve_df, aes(n, MoE, colour = Scenario), linewidth = 1) +
+  geom_point(data = pts_df, aes(n, MoE, colour = Scenario), size = 1.8, alpha = 0.7) +
+  geom_segment(data = tri_df,
+               aes(x = min(n_grid), xend = n, y = MoE, yend = MoE, colour = Scenario),
+               linetype = "dashed") +
+  geom_point(data = tri_df, aes(n, MoE, colour = Scenario),
+             shape = 17, size = 4.5) +
+  scale_colour_manual(values = cols) +
+  labs(subtitle = "95% CI; triangle = n required for a 5% half-width",
+       colour = "Assumed mean") +
+  guides(colour = guide_legend(nrow = 2)) +
+  theme(legend.position = "bottom")
+  
+ggsave("moe_vs_n_scenarios.png", width = 10, height = 6, dpi = 300)
+  
+  
+  labs(title = "Margin of error vs sample size: Stratified (Neyman allocation)",
+       subtitle = "95% CI; curves for assumed mean at 25%, 50%, 75%, 100% of baseline. Triangle = n required for a 5% half-width.",
+       x = "Sample size (n)", y = "Margin of error (price)",
+       colour = "Assumed parameter value") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+
+
+ggsave("moe_vs_n_scenarios.png", width = 10, height = 6, dpi = 300)
+
+################### Creating a new stratified dataset with relevant features.
+library(dplyr)
+
+set.seed(20031106)
+
+# Give every diamond in the population a unique ID before sampling
+pop   <- diamond_finite %>% mutate(pop_id = row_number())
+alloc <- strata %>% select(cut, N_h, n_h)          # Neyman allocation from before
+
+# ---------- Population within-stratum quantities (finite population) ----------
+#   Ybar_h  = (1/N_h) * sum(y_hj)
+#   S2_h    = 1/(N_h - 1) * sum( (y_hj - Ybar_h)^2 )   # S_i^2 in the notes
+#   sigma2_h= 1/N_h       * sum( (y_hj - Ybar_h)^2 )   # sigma_i^2 in the notes
+pop_var <- pop %>%
+  group_by(cut) %>%
+  summarise(Ybar_h   = mean(price),
+            SS_h     = sum((price - mean(price))^2),
+            S2_h     = SS_h / (n() - 1),
+            sigma2_h = SS_h / n(),
+            .groups  = "drop") %>%
+  select(cut, S2_h, sigma2_h)
+
+frame <- pop %>%
+  left_join(alloc,   by = "cut") %>%
+  left_join(pop_var, by = "cut")
+
+# ---------- SRSWOR of n_h units within each cut (same draw as before) ----------
+stratified_final <- do.call(rbind, lapply(
+  split(frame, frame$cut),
+  function(d) d[sample(nrow(d), d$n_h[1], replace = FALSE), ]))
+rownames(stratified_final) <- NULL
+
+# ---------- Sample within-stratum variance ----------
+#   ybar_h = (1/n_h) * sum(y_hj)
+#   s2_h   = 1/(n_h - 1) * sum( (y_hj - ybar_h)^2 )    # s_i^2 in the notes
+stratified_final <- stratified_final %>%
+  group_by(cut) %>%
+  mutate(s2_h = sum((price - mean(price))^2) / (n() - 1)) %>%
+  ungroup() %>%
+  mutate(incl_prob = n_h / N_h,                    # inclusion probability
+         weight    = 1 / incl_prob) %>%            # sampling weight
+  select(unit_id       = pop_id,
+         strata        = cut,
+         N_h,                                      # stratum population size
+         n_h,                                      # stratum sample size
+         incl_prob, weight,
+         S2_h_pop      = S2_h,                     # S_i^2     (divisor N_h - 1)
+         sigma2_h_pop  = sigma2_h,                 # sigma_i^2 (divisor N_h)
+         s2_h_samp     = s2_h,                     # s_i^2     (divisor n_h - 1)
+         price, carat) %>%
+  as.data.frame()
+
+# ---------- Checks ----------
+nrow(stratified_final)                        # 1253
+n_distinct(stratified_final$unit_id)          # equals nrow, so IDs are unique
+table(stratified_final$strata)                # matches n_h
+all(stratified_final$incl_prob > 0)           # TRUE
+sum(stratified_final$weight)                  # about 10000
+
+# One row per stratum
+strat_summary <- stratified_final %>%
+  group_by(strata) %>%
+  summarise(N_h = first(N_h), n_h = first(n_h), n_in_data = n(),
+            S2_h_pop     = first(S2_h_pop),
+            sigma2_h_pop = first(sigma2_h_pop),
+            s2_h_samp    = first(s2_h_samp),
+            weight       = first(weight), .groups = "drop")
+strat_summary
+
+# Verify against the notes: sigma_i^2 = (N_i - 1)/N_i * S_i^2
+all.equal(strat_summary$sigma2_h_pop,
+          (strat_summary$N_h - 1) / strat_summary$N_h * strat_summary$S2_h_pop)
+
+# Verify against base R: var() uses the (n - 1) divisor
+check <- diamond_finite %>% group_by(cut) %>% summarise(S2_check = var(price))
+all.equal(strat_summary$S2_h_pop, check$S2_check)
+
+head(stratified_final)
+View(stratified_final)
+
+write.csv(stratified_final, "stratified_final.csv", row.names = FALSE)
+write.csv(strat_summary,    "tables/stratum_summary.csv", row.names = FALSE)
+
+library(dplyr)
+library(survey)
+
+# ---------- Stratum population sizes for the fpc ----------
+N_h_lookup <- table(diamond_finite$cut)
+
+des_data <- stratified_final %>%
+  mutate(N_h = as.numeric(N_h_lookup[as.character(strata)]))
+
+# ---------- Survey design ----------
+strat_design <- svydesign(ids     = ~unit_id,   # each sampled diamond is its own unit
+                          strata  = ~strata,    # cut
+                          weights = ~weight,    # N_h / n_h
+                          fpc     = ~N_h,       # finite population correction
+                          data    = des_data)
+
+summary(strat_design)
+
+# ---------- Sanity checks ----------
+sum(weights(strat_design))              # about 10000
+table(des_data$strata, useNA = "ifany") # sample size per stratum
+
+# ---------- First estimates ----------
+m <- svymean(~price, strat_design)
+m
+confint(m)
+1.96 * as.numeric(SE(m))                # margin of error to compare with 195.466
+
+library(dplyr)
+library(survey)
+
+# ---------- Inputs ----------
+N        <- nrow(diamond_finite)
+X_bar    <- mean(diamond_finite$carat)      # known population mean of carat
+X_total  <- sum(diamond_finite$carat)       # known population total of carat
+baseline <- 3909.325
+z        <- qnorm(0.975)                    # 95% confidence
+n        <- nrow(des_data)
+
+# ---------- 0. Baseline: weighted sample mean ----------
+m0       <- svymean(~price, strat_design)
+est_mean <- as.numeric(coef(m0))
+se_mean  <- as.numeric(SE(m0))
+
+# ---------- 1. Ratio estimator ----------
+r      <- svyratio(~price, ~carat, strat_design)      # R-hat = sum(w*y) / sum(w*x)
+r_tot  <- predict(r, total = X_total)
+est_R  <- as.numeric(r_tot$total) / N                 # y_R bar = R-hat * X_bar
+se_R   <- as.numeric(r_tot$se) / N
+
+# ---------- 2. Regression estimator with b_opt_hat = s_xy / s_x^2 ----------
+w <- des_data$weight;  y <- des_data$price;  x <- des_data$carat
+
+y_w   <- sum(w * y) / sum(w)                          # weighted mean of price
+x_w   <- sum(w * x) / sum(w)                          # weighted mean of carat
+s_xy  <- sum(w * (x - x_w) * (y - y_w)) / sum(w)      # weighted covariance
+s_x2  <- sum(w * (x - x_w)^2) / sum(w)                # weighted variance of x
+b_hat <- s_xy / s_x2                                  # b_opt_hat
+
+est_reg <- y_w + b_hat * (X_bar - x_w)                # y_reg bar
+
+# Variance: variance of the weighted mean of d_i = y_i - b_hat * x_i
+m_d    <- svymean(~I(price - b_hat * carat), strat_design)
+se_reg <- as.numeric(SE(m_d))
+
+# Check against calibrate() (should match)
+m_cal <- svymean(~price, calibrate(strat_design, ~carat,
+                                   population = c("(Intercept)" = N, carat = X_total)))
+c(by_hand = est_reg, calibrate = as.numeric(coef(m_cal)))
+c(by_hand = se_reg,  calibrate = as.numeric(SE(m_cal)))
+
+# ---------- 3. Reference variance for the design effect ----------
+# SRSWOR sample mean of the same size n: V_SRS = (1 - n/N) * S^2 / n
+S2_hat <- as.numeric(svyvar(~price, strat_design))    # design-based estimate of S^2
+V_srs  <- (1 - n / N) * S2_hat / n
+
+# ---------- 4. Results table ----------
+target_hw <- 0.05 * baseline                          # 195.466
+
+results <- data.frame(
+  Method   = c("Sample mean", "Ratio", "Regression"),
+  Estimate = c(est_mean, est_R, est_reg),
+  SE       = c(se_mean,  se_R,  se_reg)
+) %>%
+  mutate(Variance    = SE^2,
+         CI_Lower    = Estimate - z * SE,
+         CI_Upper    = Estimate + z * SE,
+         CV          = SE / Estimate,
+         DEFF        = Variance / V_srs,
+         HalfWidth   = z * SE,
+         Within_5pct = HalfWidth <= target_hw) %>%
+  select(Method, Estimate, Variance, SE, CI_Lower, CI_Upper,
+         CV, DEFF, HalfWidth, Within_5pct)
+
+print(results, digits = 5, row.names = FALSE)
+
+# Optional: check the sample-mean DEFF against the survey package
+deff(svymean(~price, strat_design, deff = TRUE))
+
+# Optional: slope and correlation behind the regression estimator
+c(b_hat = b_hat, rho = s_xy / sqrt(s_x2 * sum(w * (y - y_w)^2) / sum(w)))
+
+# Optional: save the table
+write.csv(results, "stratified_estimates.csv", row.names = FALSE)
+
+library(dplyr)
+library(survey)
+
+# ---------- Common inputs ----------
+dir.create("tables", showWarnings = FALSE)       # all CSVs go in ./tables
+save_tbl <- function(df, name) {
+  write.csv(as.data.frame(df), file.path("tables", paste0(name, ".csv")),
+            row.names = FALSE)
+  invisible(df)
+}
+
+N         <- nrow(diamond_finite)                # 10000
+X_total   <- sum(diamond_finite$carat)           # known population total of carat
+X_bar     <- mean(diamond_finite$carat)          # known population mean of carat
+true_mean <- mean(diamond_finite$price)          # finite-population value (3909.325)
+baseline  <- 3909.325
+target_hw <- 0.05 * baseline                     # 5% precision target (195.466)
+z         <- qnorm(0.975)
+n_str     <- nrow(stratified_final)              # 1253
+
+# ---------- Helper: three estimators of the mean for ANY survey design ----------
+# (sample mean, ratio, regression via calibration on intercept + carat)
+est_fun <- function(design) {
+  m0 <- svymean(~price, design)
+  
+  r   <- svyratio(~price, ~carat, design)
+  tot <- predict(r, total = X_total)
+  
+  cal <- calibrate(design, ~carat,
+                   population = c("(Intercept)" = N, carat = X_total))
+  m2  <- svymean(~price, cal)
+  
+  est <- c(as.numeric(coef(m0)), as.numeric(tot$total) / N, as.numeric(coef(m2)))
+  se  <- c(as.numeric(SE(m0)),   as.numeric(tot$se) / N,    as.numeric(SE(m2)))
+  
+  data.frame(Method   = c("Sample mean", "Ratio", "Regression"),
+             Estimate = est, SE = se,
+             Lower    = est - z * se,
+             Upper    = est + z * se,
+             stringsAsFactors = FALSE)
+}
+
+
+###############################################################################
+# 1. NAIVE (UNWEIGHTED) vs DESIGN-ADJUSTED vs FINITE-POPULATION VALUE
+###############################################################################
+y <- stratified_final$price
+x <- stratified_final$carat
+n <- length(y)
+
+# Naive estimates: ignore weights, strata and fpc
+naive_mean    <- mean(y)
+naive_mean_se <- sd(y) / sqrt(n)
+
+R_naive       <- mean(y) / mean(x)
+naive_ratio   <- R_naive * X_bar
+naive_ratio_se<- sqrt(sum((y - R_naive * x)^2) / (n - 1) / n)
+
+fit_naive     <- lm(y ~ x)
+naive_reg     <- mean(y) + unname(coef(fit_naive)[2]) * (X_bar - mean(x))
+naive_reg_se  <- sqrt(sum(resid(fit_naive)^2) / (n - 2) / n)
+
+# Design-adjusted estimates (from the stratified survey object)
+des_est <- est_fun(strat_design)
+
+table1 <- data.frame(
+  Method            = des_est$Method,
+  Naive_Estimate    = c(naive_mean, naive_ratio, naive_reg),
+  Naive_SE          = c(naive_mean_se, naive_ratio_se, naive_reg_se),
+  Design_Estimate   = des_est$Estimate,
+  Design_SE         = des_est$SE,
+  Finite_Pop_Value  = true_mean
+) %>%
+  mutate(Naive_Bias      = Naive_Estimate  - Finite_Pop_Value,
+         Design_Bias     = Design_Estimate - Finite_Pop_Value,
+         Naive_RelBias_pct  = 100 * Naive_Bias  / Finite_Pop_Value,
+         Design_RelBias_pct = 100 * Design_Bias / Finite_Pop_Value)
+
+print(table1, digits = 6, row.names = FALSE)
+save_tbl(table1, "table1_naive_vs_design_vs_truth")
+
+
+###############################################################################
+# 2. NEW SRSWOR BENCHMARK (same n) vs SELECTED STRATIFIED DESIGN
+###############################################################################
+set.seed(20031106)
+srs_new <- as.data.frame(diamond_finite[sample(N, n_str, replace = FALSE),
+                                        c("cut", "price", "carat")])
+srs_new$weight <- N / n_str
+srs_new$N      <- N
+
+srs_design_new <- svydesign(ids = ~1, weights = ~weight, fpc = ~N, data = srs_new)
+
+# Reference SRSWOR variance of the sample mean at the same n (finite-pop S^2)
+S2_pop    <- var(diamond_finite$price)
+V_srs_ref <- (1 - n_str / N) * S2_pop / n_str
+
+est_strat <- est_fun(strat_design)  %>% mutate(Design = "Stratified (Neyman)")
+est_srs   <- est_fun(srs_design_new) %>% mutate(Design = "SRSWOR")
+
+table2 <- bind_rows(est_strat, est_srs) %>%
+  mutate(Variance    = SE^2,
+         CV          = SE / Estimate,
+         CI_Width    = Upper - Lower,
+         HalfWidth   = z * SE,
+         Within_5pct = HalfWidth <= target_hw,
+         DEFF_vs_SRS_ref = Variance / V_srs_ref) %>%
+  select(Design, Method, Estimate, Variance, SE, CV,
+         Lower, Upper, CI_Width, HalfWidth, Within_5pct, DEFF_vs_SRS_ref)
+
+print(as.data.frame(table2), digits = 6, row.names = FALSE)
+save_tbl(table2, "table2_stratified_vs_SRSWOR_benchmark")
+
+# Same-method design effect: Var(stratified) / Var(SRSWOR)
+table2b <- inner_join(
+  est_strat %>% transmute(Method, Var_Strat = SE^2, SE_Strat = SE),
+  est_srs   %>% transmute(Method, Var_SRS   = SE^2, SE_SRS   = SE),
+  by = "Method") %>%
+  mutate(DEFF_Strat_vs_SRS = Var_Strat / Var_SRS,
+         SE_Ratio          = SE_Strat / SE_SRS)
+
+print(table2b, digits = 5, row.names = FALSE)
+save_tbl(table2b, "table2b_same_method_DEFF")
+
+
+###############################################################################
+# 3 & 4. MONTE CARLO: REPEAT THE FULL SAMPLING + ESTIMATION PROCEDURE
+#        Keep point estimate, SE, lower and upper limits for each repetition
+###############################################################################
+R_reps <- 1000                                   # use 500 or 1000
+
+pop_idx <- split(seq_len(N), as.character(diamond_finite$cut))
+N_h_vec <- sapply(pop_idx, length)
+n_h_vec <- setNames(strata$n_h, as.character(strata$cut))[names(pop_idx)]
+n_total <- sum(n_h_vec)                          # equals n_str (1253)
+
+pop_cut   <- as.character(diamond_finite$cut)
+pop_price <- diamond_finite$price
+pop_carat <- diamond_finite$carat
+
+sim_one <- function() {
+  # ---- Stratified: SRSWOR of n_h within each cut (Neyman allocation fixed) ----
+  idx_s <- unlist(lapply(names(pop_idx), function(h)
+    pop_idx[[h]][sample.int(N_h_vec[h], n_h_vec[h])]), use.names = FALSE)
+  d_s <- data.frame(cut = pop_cut[idx_s], price = pop_price[idx_s],
+                    carat = pop_carat[idx_s], stringsAsFactors = FALSE)
+  d_s$N_h    <- unname(N_h_vec[d_s$cut])
+  d_s$weight <- d_s$N_h / unname(n_h_vec[d_s$cut])
+  des_s <- svydesign(ids = ~1, strata = ~cut, weights = ~weight,
+                     fpc = ~N_h, data = d_s)
+  
+  # ---- SRSWOR benchmark of the same total size ----
+  idx_r <- sample.int(N, n_total)
+  d_r <- data.frame(price = pop_price[idx_r], carat = pop_carat[idx_r])
+  d_r$weight <- N / n_total
+  d_r$N      <- N
+  des_r <- svydesign(ids = ~1, weights = ~weight, fpc = ~N, data = d_r)
+  
+  bind_rows(est_fun(des_s) %>% mutate(Design = "Stratified (Neyman)"),
+            est_fun(des_r) %>% mutate(Design = "SRSWOR"))
+}
+
+set.seed(20031106)
+sim_list <- vector("list", R_reps)
+for (r in seq_len(R_reps)) {
+  sim_list[[r]] <- suppressWarnings(sim_one()) %>% mutate(Rep = r)
+  if (r %% 100 == 0) cat("Completed", r, "of", R_reps, "repetitions\n")
+}
+sim_results <- bind_rows(sim_list) %>%
+  select(Rep, Design, Method, Estimate, SE, Lower, Upper)
+
+head(sim_results)
+save_tbl(sim_results, "table3_simulation_raw_results")
+
+View(sim_results)
+
+###############################################################################
+# 5. PERFORMANCE MEASURES (per design and method)
+###############################################################################
+perf <- sim_results %>%
+  group_by(Design, Method) %>%
+  summarise(
+    Reps            = n(),
+    Mean_Estimate   = mean(Estimate),
+    Bias            = mean(Estimate) - true_mean,
+    Relative_Bias_pct = 100 * (mean(Estimate) - true_mean) / true_mean,
+    Empirical_SE    = sd(Estimate),
+    Empirical_Var   = var(Estimate),
+    Avg_Estimated_SE  = mean(SE),
+    RMS_Estimated_SE  = sqrt(mean(SE^2)),
+    Avg_Estimated_Var = mean(SE^2),
+    MSE             = mean((Estimate - true_mean)^2),
+    RMSE            = sqrt(mean((Estimate - true_mean)^2)),
+    Coverage_95     = mean(Lower <= true_mean & true_mean <= Upper),
+    Avg_CI_Width    = mean(Upper - Lower),
+    Avg_HalfWidth   = mean(z * SE),
+    Prop_Within_5pct = mean(z * SE <= target_hw),
+    Achieved_5pct_on_average = mean(z * SE) <= target_hw,
+    .groups = "drop"
+  )
+
+print(as.data.frame(perf), digits = 5, row.names = FALSE)
+save_tbl(perf, "table5_performance_measures")
+
+
+###############################################################################
+# 6. MONTE CARLO STANDARD ERROR OF THE COVERAGE PROBABILITY
+###############################################################################
+table6 <- perf %>%
+  transmute(Design, Method, Reps,
+            Coverage_95,
+            MC_SE_Coverage = sqrt(Coverage_95 * (1 - Coverage_95) / Reps),
+            Coverage_Lower = Coverage_95 - 1.96 * MC_SE_Coverage,
+            Coverage_Upper = Coverage_95 + 1.96 * MC_SE_Coverage,
+            MC_SE_Bias     = Empirical_SE / sqrt(Reps),
+            Nominal_in_MC_Interval = (0.95 >= Coverage_Lower & 0.95 <= Coverage_Upper))
+
+print(as.data.frame(table6), digits = 5, row.names = FALSE)
+save_tbl(table6, "table6_MC_SE_of_coverage")
+
+
+###############################################################################
+# 7. COMPARE SELECTED DESIGN WITH SRSWOR
+###############################################################################
+pick <- function(df, suffix) {
+  df %>% select(Method, Bias, Empirical_Var, Avg_Estimated_Var, MSE, RMSE,
+                Avg_CI_Width, Coverage_95) %>%
+    rename_with(~ paste0(.x, suffix), -Method)
+}
+
+table7 <- inner_join(
+  pick(filter(perf, Design == "Stratified (Neyman)"), "_Strat"),
+  pick(filter(perf, Design == "SRSWOR"),              "_SRS"),
+  by = "Method") %>%
+  mutate(DEFF_empirical_Var = Empirical_Var_Strat / Empirical_Var_SRS,
+         DEFF_estimated_Var = Avg_Estimated_Var_Strat / Avg_Estimated_Var_SRS,
+         DEFF_MSE           = MSE_Strat / MSE_SRS,
+         RMSE_Ratio         = RMSE_Strat / RMSE_SRS,
+         CI_Width_Ratio     = Avg_CI_Width_Strat / Avg_CI_Width_SRS,
+         Rel_Efficiency     = 1 / DEFF_empirical_Var,
+         Coverage_Diff      = Coverage_95_Strat - Coverage_95_SRS)
+
+print(as.data.frame(table7), digits = 5, row.names = FALSE)
+save_tbl(table7, "table7_design_vs_SRSWOR_comparison")
+
+
+###############################################################################
+# 8. EMPIRICAL SE (SIMULATION) vs AVERAGE DESIGN-BASED ESTIMATED SE
+###############################################################################
+table8 <- perf %>%
+  transmute(Design, Method,
+            Empirical_SE,
+            Avg_Estimated_SE,
+            RMS_Estimated_SE,
+            Diff_Avg_minus_Emp   = Avg_Estimated_SE - Empirical_SE,
+            Pct_Diff_Avg         = 100 * (Avg_Estimated_SE - Empirical_SE) / Empirical_SE,
+            Ratio_Avg_to_Emp     = Avg_Estimated_SE / Empirical_SE,
+            Ratio_RMS_to_Emp     = RMS_Estimated_SE / Empirical_SE)
+
+print(as.data.frame(table8), digits = 5, row.names = FALSE)
+save_tbl(table8, "table8_empirical_vs_estimated_SE")
+
+
+###############################################################################
+# 9. SAVE THE DATASETS AND EARLIER TABLES AS CSV
+###############################################################################
+write.csv(as.data.frame(diamond_finite), "diamond_finite.csv",   row.names = FALSE)
+write.csv(as.data.frame(stratified_final), "stratified_final.csv", row.names = FALSE)
+
+# Earlier tables from your original script (saved only if they exist)
+if (exists("strata"))  save_tbl(strata,  "strata_neyman_allocation")
+if (exists("results")) save_tbl(results, "stratified_estimates_table")
+if (exists("res"))     save_tbl(res,     "srs_vs_stratified_estimates")
+
+cat("\nAll tables saved in:", normalizePath("tables"), "\n")
+cat("Datasets saved in:   ", getwd(), "\n")
+
+
+
+############ Table: what was held constant vs varied in the sensitivity analysis ############
+n_common <- tri_df$n[1]                                  # required n (same in every scenario)
+
+cv_by_scale <- sapply(scales, function(k) {
+  sum(pop_str$W_h * (k * pop_str$S_h)) / (k * baseline)  # A / assumed mean
+})
+
+parameter <- c("Confidence level", "Relative precision requirement",
+               "Population size (N)", "Number of strata (cut)",
+               "Stratum weights (W_h)", "Allocation rule",
+               "Estimator / variance formula",
+               "Coefficient of variation (S_h / mean)",
+               "Required sample size (n)",
+               "Assumed mean", "Within-stratum SDs (S_h)",
+               "Target half-width (USD)")
+
+status <- c(rep("Constant", 9), rep("Varied", 3))
+
+value <- c("95% (z = 1.96)",
+           "5% of the assumed mean",
+           format(N),
+           as.character(nrow(pop_str)),
+           "N_h / N (unchanged)",
+           "Neyman: n_h proportional to N_h * S_h",
+           "Stratified mean, V_opt = A^2/n - B",
+           sprintf("%.4f in every scenario", cv_by_scale[1]),
+           sprintf("%.0f in every scenario", n_common),
+           paste(sprintf("%.1f", scales * baseline), collapse = ", "),
+           "Baseline S_h multiplied by k = 0.25, 0.50, 0.75, 1.00",
+           paste(sprintf("%.1f", 0.05 * scales * baseline), collapse = ", "))
+
+# Safety check: all three vectors must have the same length
+stopifnot(length(parameter) == length(status), length(status) == length(value))
+
+sens_setup <- data.frame(Parameter = parameter, Status = status, Value = value)
+
+print(sens_setup, row.names = FALSE)
+write.csv(sens_setup, "tables/sensitivity_setup_constants_vs_varied.csv", row.names = FALSE)
